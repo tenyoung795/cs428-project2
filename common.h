@@ -23,4 +23,8 @@ struct cs428_packet {
     };
 };
 
+enum {
+    CS428_SERVER_PORT = 9999,
+};
+
 #endif // CS428_PACKET_H
