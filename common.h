@@ -4,15 +4,22 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+typedef uint64_t cs428_seq_no_t;
+typedef uint64_t cs428_filesize_t;
+enum {
+    CS428_FILENAME_MAX = 256,
+    CS428_CONTENT_SIZE = 512,
+};
+
 struct cs428_packet {
-    uint64_t sequence_number;
+    cs428_seq_no_t sequence_number;
     bool is_content;
     union {
         struct {
-            char filename[256];
-            uint64_t filesize;
+            char filename[CS428_FILENAME_MAX];
+            cs428_filesize_t filesize;
         };
-        char content[512];
+        char content[CS428_CONTENT_SIZE];
     };
 };
 
