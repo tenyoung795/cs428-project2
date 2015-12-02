@@ -11,7 +11,7 @@ enum {
     CS428_CONTENT_SIZE = 512,
 };
 
-struct cs428_packet {
+typedef struct {
     cs428_seq_no_t sequence_number;
     bool is_content;
     union {
@@ -21,7 +21,7 @@ struct cs428_packet {
         };
         char content[CS428_CONTENT_SIZE];
     };
-};
+} cs428_packet_t ;
 
 enum {
     CS428_SERVER_PORT = 9999,
