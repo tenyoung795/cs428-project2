@@ -1,8 +1,10 @@
 #ifndef CS428_PACKET_H
 #define CS428_PACKET_H
 
+#include <arpa/inet.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 typedef enum {
     CS428_METADATA = 0,
@@ -27,5 +29,23 @@ enum {
     CS428_WINDOW_SIZE = 16,
     CS428_SERVER_PORT = 9999,
 };
+
+static uint64_t cs428_ntoh64(const void *x) {
+    uint32_t from[2];
+    memcpy(from, x, 8);
+    uint64_t a = ntohl(from[0]);
+    uint32_t b = ntohl(from[1]);
+    return (a << 32) | b;
+}
+
+static uint64_t cs428_hton64(uint64_t x) {
+    union {
+        uint32_t from[2];
+        uint64_t to;
+    } result;
+    result.from[0] = htonl((uint32_t)(x >> 32));
+    result.from[1] = htonl((uint32_t)x);
+    return result.to;
+}
 
 #endif // CS428_PACKET_H
