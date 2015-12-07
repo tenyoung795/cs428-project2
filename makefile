@@ -1,4 +1,4 @@
-CFLAGS += -std=c11 -Wall -Wextra -O3
+CFLAGS += -std=gnu11 -Wall -Wextra -g
 
 server: server.c common.h
 
