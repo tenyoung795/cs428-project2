@@ -95,7 +95,7 @@ static int cs428_session_prepend(cs428_session_t **head,
         result = -errno;
         goto free_session;
     }
-    if (fallocate(session->fd, 0, 0, filesize)) {
+    if (fallocate(session->fd, 0, 0, filesize) && ftruncate(session->fd, filesize)) {
         result = -errno;
         goto close_fd;
     }
