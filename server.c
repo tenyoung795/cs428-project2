@@ -173,7 +173,7 @@ static int cs428_session_process_content(cs428_session_t *session,
     return should_ack;
 }
 
-static int cs428_server_init(cs428_server_t *server) {
+static int cs428_server_init(cs428_server_t *server, in_port_t port) {
     server->fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (server->fd == -1) {
         return -errno;
@@ -181,7 +181,7 @@ static int cs428_server_init(cs428_server_t *server) {
 
     struct sockaddr_in address = {
         .sin_family = AF_INET,
-        .sin_port = htons(CS428_SERVER_PORT),
+        .sin_port = htons(port),
         .sin_addr = { htonl(INADDR_ANY) },
     };
     if (bind(server->fd, (struct sockaddr *)&address, sizeof(address))) {
@@ -195,7 +195,7 @@ static int cs428_server_init(cs428_server_t *server) {
 }
 
 static void cs428_server_ack(const cs428_server_t *server, const cs428_session_t *session) {
-    uint64_t ack_no = session->first_seq_no + session->last_received_frame + 1;
+    uint64_t ack_no = session->first_seq_no + session->last_received_frame;
     uint64_t result = cs428_hton64(ack_no);
     if (sendto(server->fd, &result, sizeof(result), 0,
                (struct sockaddr *)&session->address, sizeof(session->address)) < 0) {
@@ -285,9 +285,13 @@ static void cs428_server_run(cs428_server_t *server) {
 }
 
 int main(int argc, char *argv[]) {
-    (void)argc;
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s PORT\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+    in_port_t port = atoi(argv[1]);
     cs428_server_t server;
-    int result = cs428_server_init(&server);
+    int result = cs428_server_init(&server, port);
     if (result) {
         fprintf(stderr, "%s: could not open socket: %s\n", argv[0], strerror(-result));
         return EXIT_FAILURE;
