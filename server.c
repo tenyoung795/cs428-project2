@@ -28,7 +28,7 @@ typedef struct cs428_session {
     char tmp_filename[sizeof("XXXXXX")];
     int fd;
 
-    uint64_t last_received_frame;
+    uint64_t last_frame_received;
     unsigned int window : CS428_WINDOW_SIZE;
 
     struct cs428_session *prev;
@@ -106,7 +106,7 @@ static int cs428_session_prepend(cs428_session_t **head,
         goto close_fd;
     }
 
-    session->last_received_frame = 0;
+    session->last_frame_received = 0;
     session->window = 0;
 
     session->prev = NULL;
@@ -134,7 +134,7 @@ static int cs428_session_process_content(cs428_session_t *session,
                                          const void *content) {
     uint64_t frame = seq_no - session->first_seq_no;
     uint64_t last_content_frame = cs428_last_content_frame(session->filesize);
-    uint64_t window_end = session->last_received_frame + CS428_WINDOW_SIZE;
+    uint64_t window_end = session->last_frame_received + CS428_WINDOW_SIZE;
     uint64_t largest_frame_acceptable = window_end < last_content_frame
         ? window_end : last_content_frame;
 
@@ -145,7 +145,7 @@ static int cs428_session_process_content(cs428_session_t *session,
         return 0;
     }
 
-    if (frame <= session->last_received_frame) {
+    if (frame <= session->last_frame_received) {
         return 1;
     }
 
@@ -163,8 +163,8 @@ static int cs428_session_process_content(cs428_session_t *session,
     session->window |= 1 << (frame % CS428_WINDOW_SIZE);
 
     bool should_ack = false;
-    while (session->last_received_frame < largest_frame_acceptable) {
-        uint64_t next_frame = session->last_received_frame + 1;
+    while (session->last_frame_received < largest_frame_acceptable) {
+        uint64_t next_frame = session->last_frame_received + 1;
         if (!cs428_session_frame_received(session, next_frame)) break;
 
         session->window &= ~(1 << (next_frame % CS428_WINDOW_SIZE));
@@ -173,7 +173,7 @@ static int cs428_session_process_content(cs428_session_t *session,
                 || rename(session->tmp_filename, session->filename))) {
             return -errno;
         }
-        ++session->last_received_frame;
+        ++session->last_frame_received;
         should_ack = true;
     }
     return should_ack;
@@ -216,7 +216,7 @@ static void cs428_server_ack(cs428_server_t *server, const cs428_session_t *sess
         }
     }
 
-    uint64_t ack_no = session->first_seq_no + session->last_received_frame;
+    uint64_t ack_no = session->first_seq_no + session->last_frame_received;
     uint64_t result = cs428_hton64(ack_no);
     if (sendto(server->fd, &result, sizeof(result), 0,
                (struct sockaddr *)&session->address, sizeof(session->address)) < 0) {
@@ -293,7 +293,7 @@ static void cs428_server_run(cs428_server_t *server) {
                 cs428_server_ack(server, session);
             }
 
-            if (session->last_received_frame == last_content_frame) {
+            if (session->last_frame_received == last_content_frame) {
                 uint64_t frame = seq_no - session->first_seq_no;
                 if (frame != last_content_frame + 1) continue;
                 
