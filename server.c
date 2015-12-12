@@ -14,6 +14,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "common.h"
@@ -37,6 +38,11 @@ typedef struct cs428_session {
 typedef struct {
     int fd;
     cs428_session_t *sessions;
+
+    char random_state[256];
+    struct random_data random;
+    double fraction_recv_dropped;
+    double fraction_send_dropped;
 } cs428_server_t;
 
 static bool cs428_sockaddr_in_eq(const struct sockaddr_in *a, const struct sockaddr_in *b) {
@@ -173,7 +179,8 @@ static int cs428_session_process_content(cs428_session_t *session,
     return should_ack;
 }
 
-static int cs428_server_init(cs428_server_t *server, in_port_t port) {
+static int cs428_server_init(cs428_server_t *server, in_port_t port,
+                             double fraction_recv_dropped, double fraction_send_dropped) {
     server->fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (server->fd == -1) {
         return -errno;
@@ -191,10 +198,24 @@ static int cs428_server_init(cs428_server_t *server, in_port_t port) {
     }
 
     server->sessions = NULL;
+
+    memset(&server->random, 0, sizeof(server->random));
+    initstate_r((unsigned int)clock(),
+                server->random_state, sizeof(server->random_state), &server->random);
+    server->fraction_recv_dropped = fraction_recv_dropped;
+    server->fraction_send_dropped = fraction_send_dropped;
     return 0;
 }
 
-static void cs428_server_ack(const cs428_server_t *server, const cs428_session_t *session) {
+static void cs428_server_ack(cs428_server_t *server, const cs428_session_t *session) {
+    {
+        int32_t random_result;
+        random_r(&server->random, &random_result);
+        if (random_result < server->fraction_send_dropped * RAND_MAX) {
+            return;
+        }
+    }
+
     uint64_t ack_no = session->first_seq_no + session->last_received_frame;
     uint64_t result = cs428_hton64(ack_no);
     if (sendto(server->fd, &result, sizeof(result), 0,
@@ -213,6 +234,14 @@ static void cs428_server_run(cs428_server_t *server) {
         if (result == -1) {
             fprintf(stderr, "could not receive packet: %s\n", strerror(-result));
             continue;
+        }
+
+        {
+            int32_t random_result;
+            random_r(&server->random, &random_result);
+            if (random_result < server->fraction_recv_dropped * RAND_MAX) {
+                continue;
+            }
         }
 
         if (result < CS428_MIN_PACKET_SIZE) {
@@ -285,13 +314,33 @@ static void cs428_server_run(cs428_server_t *server) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s PORT\n", argv[0]);
+    double fraction_recv_dropped = 0;
+    double fraction_send_dropped = 0;
+
+    bool done = false;
+    while (!done) {
+        switch (getopt(argc, argv, "r:s:")) {
+        case -1:
+            done = true;
+            break;
+        case 'r':
+            fraction_recv_dropped = atof(optarg);
+            break;
+        case 's':
+            fraction_send_dropped = atof(optarg);
+            break;
+        default:
+            break;
+        }
+    }
+
+    if (!argv[optind]) {
+        fprintf(stderr, "Usage: %s [-r FRACTION_RECV_DROPPED] [-s FRACTION_SEND_DROPPED] PORT\n", argv[0]);
         return EXIT_FAILURE;
     }
-    in_port_t port = atoi(argv[1]);
+    in_port_t port = atoi(argv[optind]);
     cs428_server_t server;
-    int result = cs428_server_init(&server, port);
+    int result = cs428_server_init(&server, port, fraction_recv_dropped, fraction_send_dropped);
     if (result) {
         fprintf(stderr, "%s: could not open socket: %s\n", argv[0], strerror(-result));
         return EXIT_FAILURE;
