@@ -110,6 +110,9 @@ static int cs428_session_prepend(cs428_session_t **head,
     session->prev = NULL;
     session->next = *head;
     *head = session;
+    if (session->next) {
+        session->next->prev = session;
+    }
     return 0;
 
     close_fd:
