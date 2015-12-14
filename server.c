@@ -230,6 +230,18 @@ static void cs428_server_ack(cs428_server_t *server, const cs428_session_t *sess
     }
 }
 
+static void cs428_server_remove_session(cs428_server_t *server, cs428_session_t *session) {
+    if (session == server->sessions) {
+        server->sessions = session->next;
+    } else {
+        session->prev->next = session->next;
+    }
+    msync(session->mapping, session->filesize, MS_ASYNC);
+    munmap(session->mapping, session->filesize);
+    close(session->fd);
+    free(session);
+}
+
 static void cs428_server_run(cs428_server_t *server) {
     while (true) {
         char packet[CS428_MAX_PACKET_SIZE];
@@ -308,15 +320,7 @@ static void cs428_server_run(cs428_server_t *server) {
 
             uint64_t last_content_frame = cs428_last_content_frame(session->filesize);
             if (finish_result > 0 && frame == last_content_frame + 1) {
-                if (session == server->sessions) {
-                    server->sessions = session->next;
-                } else {
-                    session->prev->next = session->next;
-                }
-                msync(session->mapping, session->filesize, MS_ASYNC);
-                munmap(session->mapping, session->filesize);
-                close(session->fd);
-                free(session);
+                cs428_server_remove_session(server, session);
             }
             break;
         }
