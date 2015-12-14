@@ -307,7 +307,7 @@ static void cs428_server_run(cs428_server_t *server) {
             }
 
             uint64_t last_content_frame = cs428_last_content_frame(session->filesize);
-            if (finish_result && frame == last_content_frame + 1) {
+            if (finish_result > 0 && frame == last_content_frame + 1) {
                 if (session == server->sessions) {
                     server->sessions = session->next;
                 } else {
