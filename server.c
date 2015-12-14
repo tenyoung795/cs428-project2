@@ -30,6 +30,13 @@ typedef struct cs428_session {
 
     uint64_t last_frame_received;
     unsigned int window : CS428_WINDOW_SIZE;
+    char frames[CS428_WINDOW_SIZE][CS428_MAX_CONTENT_SIZE];
+    enum {
+        CS428_STATE_INCOMPLETE,
+        CS428_STATE_WRITTEN,
+        CS428_STATE_SYNCED,
+        CS428_STATE_RENAMED,
+    } last_content_frame_state;
 
     struct cs428_session *prev;
     struct cs428_session *next;
@@ -53,16 +60,6 @@ static bool cs428_sockaddr_in_eq(const struct sockaddr_in *a, const struct socka
 static uint64_t cs428_last_content_frame(uint64_t filesize) {
     return 1 // metadata packet
         + filesize / CS428_MAX_CONTENT_SIZE; // full content packets
-}
-
-static int cs428_write_all(int fd, const void *buf, size_t remaining) {
-    while (remaining > 0) {
-        ssize_t result = write(fd, buf, remaining);
-        if (result < 0) return -errno;
-        buf += result;
-        remaining -= result;
-    }
-    return 0;
 }
 
 static cs428_session_t *cs428_find_session(cs428_session_t *head,
@@ -108,6 +105,7 @@ static int cs428_session_prepend(cs428_session_t **head,
 
     session->last_frame_received = 0;
     session->window = 0;
+    session->last_content_frame_state = CS428_STATE_INCOMPLETE;
 
     session->prev = NULL;
     session->next = *head;
@@ -123,9 +121,13 @@ static int cs428_session_prepend(cs428_session_t **head,
     return result;
 }
 
-static bool cs428_session_frame_received(const cs428_session_t *session,
-                                         uint64_t frame) {
-    return session->window & (1 << (frame % CS428_WINDOW_SIZE));
+static bool cs428_session_slot_received(const cs428_session_t *session,
+                                        size_t slot) {
+    return session->window & (1 << slot);
+}
+
+static size_t cs428_session_slot(uint64_t frame) {
+    return (frame - 1) % CS428_WINDOW_SIZE;
 }
 
 static int cs428_session_process_content(cs428_session_t *session,
@@ -141,42 +143,62 @@ static int cs428_session_process_content(cs428_session_t *session,
     uint64_t expected_content_size = frame < last_content_frame
         ? CS428_MAX_CONTENT_SIZE
         : session->filesize % CS428_MAX_CONTENT_SIZE;
-    if (content_size != expected_content_size) {
+    size_t slot = cs428_session_slot(frame);
+    if (content_size != expected_content_size
+        || frame <= session->last_frame_received
+        || frame > largest_frame_acceptable
+        || cs428_session_slot_received(session, slot)) {
         return 0;
     }
 
-    if (frame <= session->last_frame_received) {
-        return 1;
-    }
-
-    if (frame > largest_frame_acceptable
-        || cs428_session_frame_received(session, frame)) {
-        return 0;
-    }
-
-    if (lseek(session->fd, (frame - 1) * CS428_MAX_CONTENT_SIZE, SEEK_SET) == -1) {
+    if (slot == 0 && frame > 1
+        && write(session->fd, session->frames, sizeof(session->frames)) < 0) {
         return -errno;
     }
-    int result = cs428_write_all(session->fd, content, content_size);
-    if (result < 0) return result;
 
-    session->window |= 1 << (frame % CS428_WINDOW_SIZE);
+    session->window |= 1 << slot;
+    memcpy(session->frames + slot, content, content_size);
 
-    bool should_ack = false;
     while (session->last_frame_received < largest_frame_acceptable) {
-        uint64_t next_frame = session->last_frame_received + 1;
-        if (!cs428_session_frame_received(session, next_frame)) break;
+        if (!cs428_session_slot_received(session, slot)) break;
+        session->window &= ~(1 << slot);
+        slot = (slot + 1) % CS428_WINDOW_SIZE;
+        ++session->last_frame_received;
+    }
 
-        session->window &= ~(1 << (next_frame % CS428_WINDOW_SIZE));
-        if (next_frame == last_content_frame
-            && (fsync(session->fd)
-                || rename(session->tmp_filename, session->filename))) {
+    return 0;
+}
+
+static int cs428_session_try_finish(cs428_session_t *session) {
+    uint64_t last_content_frame = cs428_last_content_frame(session->filesize);
+    if (session->last_frame_received != last_content_frame) {
+        return 0;
+    }
+
+    switch (session->last_content_frame_state) {
+    case CS428_STATE_INCOMPLETE: {
+        size_t last_slot = cs428_session_slot(last_content_frame);
+        uint64_t remainder = session->filesize % CS428_MAX_CONTENT_SIZE;
+        size_t count = last_slot * sizeof(*session->frames) + remainder;
+        if (write(session->fd, session->frames, count) < 0) {
             return -errno;
         }
-        ++session->last_frame_received;
-        should_ack = true;
+        ++session->last_content_frame_state;
     }
-    return should_ack;
+    case CS428_STATE_WRITTEN:
+        if (fsync(session->fd)) {
+            return -errno;
+        }
+        ++session->last_content_frame_state;
+    case CS428_STATE_SYNCED:
+        if (rename(session->tmp_filename, session->filename)) {
+            return- errno;
+        }
+        ++session->last_content_frame_state;
+    case CS428_STATE_RENAMED:
+        break;
+    }
+    return 1;
 }
 
 static int cs428_server_init(cs428_server_t *server, in_port_t port,
@@ -216,7 +238,9 @@ static void cs428_server_ack(cs428_server_t *server, const cs428_session_t *sess
         }
     }
 
-    uint64_t ack_no = session->first_seq_no + session->last_frame_received;
+    uint64_t ack_no = session->first_seq_no + session->last_frame_received
+        - (session->last_frame_received == cs428_last_content_frame(session->filesize)
+           && session->last_content_frame_state != CS428_STATE_RENAMED);
     uint64_t result = cs428_hton64(ack_no);
     if (sendto(server->fd, &result, sizeof(result), 0,
                (struct sockaddr *)&session->address, sizeof(session->address)) < 0) {
@@ -281,22 +305,27 @@ static void cs428_server_run(cs428_server_t *server) {
             uint64_t seq_no = cs428_ntoh64(packet);
             uint64_t content_size = result - 8 - 1;
             const void *content = packet + 8 + 1;
-            uint64_t last_content_frame = cs428_last_content_frame(session->filesize);
+            uint64_t previous_last_frame_received = session->last_frame_received;
             int session_result = cs428_session_process_content(session, seq_no,
                                                                content_size, content);
             if (session_result < 0) {
-                fprintf(stderr, "could not process content: %s\n", strerror(-session_result));
-                break;
+                fprintf(stderr, "error on processing content: %s\n", strerror(-session_result));
             }
 
-            if (session_result) {
+            int finish_result = cs428_session_try_finish(session);
+            if (finish_result < 0) {
+                fprintf(stderr, "error on finishing session: %s\n", strerror(-finish_result));
+            }
+
+            uint64_t frame = seq_no - session->first_seq_no;
+            if (frame <= previous_last_frame_received
+                || session->last_frame_received > previous_last_frame_received
+                || session->last_content_frame_state == CS428_STATE_RENAMED) {
                 cs428_server_ack(server, session);
             }
 
-            if (session->last_frame_received == last_content_frame) {
-                uint64_t frame = seq_no - session->first_seq_no;
-                if (frame != last_content_frame + 1) continue;
-                
+            uint64_t last_content_frame = cs428_last_content_frame(session->filesize);
+            if (finish_result && frame == last_content_frame + 1) {
                 if (session == server->sessions) {
                     server->sessions = session->next;
                 } else {
@@ -304,7 +333,7 @@ static void cs428_server_run(cs428_server_t *server) {
                 }
                 close(session->fd);
                 free(session);
-            } 
+            }
             break;
         }
         default:
