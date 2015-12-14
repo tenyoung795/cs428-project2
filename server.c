@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -11,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -27,14 +27,11 @@ typedef struct cs428_session {
 
     char tmp_filename[sizeof("XXXXXX")];
     int fd;
+    void *mapping;
 
     uint64_t last_frame_received;
     unsigned int window : CS428_WINDOW_SIZE;
-    enum {
-        CS428_STATE_INCOMPLETE,
-        CS428_STATE_SYNCED,
-        CS428_STATE_RENAMED,
-    } last_content_frame_state;
+    bool renamed;
 
     struct cs428_session *prev;
     struct cs428_session *next;
@@ -96,14 +93,20 @@ static int cs428_session_prepend(cs428_session_t **head,
         result = -errno;
         goto free_session;
     }
-    if (fallocate(session->fd, 0, 0, filesize) && ftruncate(session->fd, filesize)) {
+    if (posix_fallocate(session->fd, 0, filesize) && ftruncate(session->fd, filesize)) {
         result = -errno;
         goto close_fd;
     }
+    session->mapping = mmap(NULL, filesize, PROT_WRITE, MAP_SHARED, session->fd, 0);
+    if (session->mapping == MAP_FAILED) {
+        result = -errno;
+        goto close_fd;
+    }
+    posix_madvise(session->mapping, filesize, POSIX_MADV_SEQUENTIAL);
 
     session->last_frame_received = 0;
     session->window = 0;
-    session->last_content_frame_state = CS428_STATE_INCOMPLETE;
+    session->renamed = false;
 
     session->prev = NULL;
     session->next = *head;
@@ -152,10 +155,7 @@ static int cs428_session_process_content(cs428_session_t *session,
         return 0;
     }
 
-    if (pwrite(session->fd, content, content_size, (frame - 1) * CS428_MAX_CONTENT_SIZE) < 0) {
-        return -errno;
-    }
-
+    memcpy(session->mapping + (frame - 1) * CS428_MAX_CONTENT_SIZE, content, content_size);
     session->window |= 1 << slot;
 
     while (session->last_frame_received < largest_frame_acceptable) {
@@ -174,19 +174,11 @@ static int cs428_session_try_finish(cs428_session_t *session) {
         return 0;
     }
 
-    switch (session->last_content_frame_state) {
-    case CS428_STATE_INCOMPLETE:
-        if (fsync(session->fd)) {
+    if (!session->renamed) {
+        if (rename(session->tmp_filename, session->filename)) {
             return -errno;
         }
-        ++session->last_content_frame_state;
-    case CS428_STATE_SYNCED:
-        if (rename(session->tmp_filename, session->filename)) {
-            return- errno;
-        }
-        ++session->last_content_frame_state;
-    case CS428_STATE_RENAMED:
-        break;
+        session->renamed = true;
     }
     return 1;
 }
@@ -230,7 +222,7 @@ static void cs428_server_ack(cs428_server_t *server, const cs428_session_t *sess
 
     uint64_t ack_no = session->first_seq_no + session->last_frame_received
         - (session->last_frame_received == cs428_last_content_frame(session->filesize)
-           && session->last_content_frame_state != CS428_STATE_RENAMED);
+           && !session->renamed);
     uint64_t result = cs428_hton64(ack_no);
     if (sendto(server->fd, &result, sizeof(result), 0,
                (struct sockaddr *)&session->address, sizeof(session->address)) < 0) {
@@ -310,7 +302,7 @@ static void cs428_server_run(cs428_server_t *server) {
             uint64_t frame = seq_no - session->first_seq_no;
             if (frame <= previous_last_frame_received
                 || session->last_frame_received > previous_last_frame_received
-                || session->last_content_frame_state == CS428_STATE_RENAMED) {
+                || session->renamed) {
                 cs428_server_ack(server, session);
             }
 
@@ -321,6 +313,8 @@ static void cs428_server_run(cs428_server_t *server) {
                 } else {
                     session->prev->next = session->next;
                 }
+                msync(session->mapping, session->filesize, MS_ASYNC);
+                munmap(session->mapping, session->filesize);
                 close(session->fd);
                 free(session);
             }
