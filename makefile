@@ -1,8 +1,9 @@
 CFLAGS += -std=gnu11 -Wall -Wextra
 
-server: server.c common.h
+server: server.o
+server.o: server.c common.h
 
 .PHONY: clean
 
 clean:
-	rm -f server
+	rm -f server server.o
