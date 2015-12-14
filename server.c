@@ -30,10 +30,8 @@ typedef struct cs428_session {
 
     uint64_t last_frame_received;
     unsigned int window : CS428_WINDOW_SIZE;
-    char frames[CS428_WINDOW_SIZE][CS428_MAX_CONTENT_SIZE];
     enum {
         CS428_STATE_INCOMPLETE,
-        CS428_STATE_WRITTEN,
         CS428_STATE_SYNCED,
         CS428_STATE_RENAMED,
     } last_content_frame_state;
@@ -154,18 +152,16 @@ static int cs428_session_process_content(cs428_session_t *session,
         return 0;
     }
 
-    if (slot == 0 && frame > 1
-        && write(session->fd, session->frames, sizeof(session->frames)) < 0) {
+    if (pwrite(session->fd, content, content_size, (frame - 1) * CS428_MAX_CONTENT_SIZE) < 0) {
         return -errno;
     }
 
     session->window |= 1 << slot;
-    memcpy(session->frames + slot, content, content_size);
 
     while (session->last_frame_received < largest_frame_acceptable) {
-        if (!cs428_session_slot_received(session, slot)) break;
-        session->window &= ~(1 << slot);
-        slot = (slot + 1) % CS428_WINDOW_SIZE;
+        size_t next_slot = cs428_session_slot(session->last_frame_received + 1);
+        if (!cs428_session_slot_received(session, next_slot)) break;
+        session->window &= ~(1 << next_slot);
         ++session->last_frame_received;
     }
 
@@ -179,16 +175,7 @@ static int cs428_session_try_finish(cs428_session_t *session) {
     }
 
     switch (session->last_content_frame_state) {
-    case CS428_STATE_INCOMPLETE: {
-        size_t last_slot = cs428_session_slot(last_content_frame);
-        uint64_t remainder = session->filesize % CS428_MAX_CONTENT_SIZE;
-        size_t count = last_slot * sizeof(*session->frames) + remainder;
-        if (write(session->fd, session->frames, count) < 0) {
-            return -errno;
-        }
-        ++session->last_content_frame_state;
-    }
-    case CS428_STATE_WRITTEN:
+    case CS428_STATE_INCOMPLETE:
         if (fsync(session->fd)) {
             return -errno;
         }
