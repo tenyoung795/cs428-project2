@@ -57,7 +57,7 @@ char *create_packet(FILE *fp,uint64_t seq_no){
        } 
     return 0;
 }
-int cs428_connect(char* ip, FILE *fp)
+int cs428_connect(const char* ip, const char *port, FILE *fp)
     {
       /* udp socket creation */  
        int cs428_socket;
@@ -72,8 +72,6 @@ int cs428_connect(char* ip, FILE *fp)
         memset(&hints,0,sizeof(hints));
         hints.ai_family=AF_INET;
         hints.ai_socktype=SOCK_DGRAM;
-        char *port=malloc(sizeof(int));
-        sprintf(port,"%d",CS428_SERVER_PORT);
         printf("ip%s,port:%s\n",ip,port);
         if((status=getaddrinfo(ip,port,&hints, &servaddr))!=0){
             fprintf(stderr, "getaddrinfo error:%s\n", gai_strerror(status));
@@ -171,24 +169,24 @@ printf("timelist:%ld\n",timeout_list[0]);
 int main(int argc, char* argv[])
     {
         last_ack=-1;
-        if(argc<3){
-            fprintf(stderr, "Usage:%s IP_Adress Filename\n", argv[0]);
+        if(argc<5){
+            fprintf(stderr, "Usage:%s Hostname Port Filename Destination\n", argv[0]);
             return EXIT_FAILURE;
             }
         FILE *fp;
         chunk_no=0;
-        char *ipaddr=argv[2];
+        const char *ipaddr=argv[1];
+        const char *port=argv[2];
         struct stat st;
-        stat(argv[1],&st);
+        stat(argv[3],&st);
         filesize=st.st_size;
-        filename=strdup(argv[1]);
-        if((fp=fopen(argv[1],"rb"))!=0)
+        filename=argv[4];
+        if((fp=fopen(argv[3],"rb"))!=0)
         {  
-            basename(filename);
-            printf("reading%s  filename:%s filesize:%d\n",argv[1],filename,filesize);
+            printf("reading%s  filename:%s filesize:%d\n",argv[3],filename,filesize);
             }
     
-       cs428_connect(ipaddr,fp);
+       cs428_connect(ipaddr,port,fp);
         fclose(fp);
         return 0;
     }
