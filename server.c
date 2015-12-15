@@ -27,6 +27,7 @@ typedef struct cs428_session {
 
     char tmp_filename[sizeof("XXXXXX")];
     int fd;
+    // NULL for an empty file; mmap does not like empty mappings.
     void *mapping;
 
     uint64_t last_frame_received;
@@ -93,16 +94,22 @@ static int cs428_session_prepend(cs428_session_t **head,
         result = -errno;
         goto free_session;
     }
-    if (posix_fallocate(session->fd, 0, filesize) && ftruncate(session->fd, filesize)) {
-        result = -errno;
-        goto close_fd;
+    if (filesize > 0) {
+        if (posix_fallocate(session->fd, 0, filesize) && ftruncate(session->fd, filesize)) {
+            result = -errno;
+            goto close_fd;
+        }
+        session->mapping = mmap(NULL, filesize, PROT_WRITE, MAP_SHARED, session->fd, 0);
+        if (session->mapping == MAP_FAILED) {
+            result = -errno;
+            goto close_fd;
+        }
+        posix_madvise(session->mapping, filesize, POSIX_MADV_SEQUENTIAL);
+    } else {
+        // fallocate and mmap do not like 0 lengths.
+        // ftruncate is fine with a 0 length, but ftruncate'ing a new file to 0 is redundant.
+        session->mapping = NULL;
     }
-    session->mapping = mmap(NULL, filesize, PROT_WRITE, MAP_SHARED, session->fd, 0);
-    if (session->mapping == MAP_FAILED) {
-        result = -errno;
-        goto close_fd;
-    }
-    posix_madvise(session->mapping, filesize, POSIX_MADV_SEQUENTIAL);
 
     session->last_frame_received = 0;
     session->window = 0;
@@ -236,8 +243,10 @@ static void cs428_server_remove_session(cs428_server_t *server, cs428_session_t 
     } else {
         session->prev->next = session->next;
     }
-    msync(session->mapping, session->filesize, MS_ASYNC);
-    munmap(session->mapping, session->filesize);
+    if (session->mapping) {
+        msync(session->mapping, session->filesize, MS_ASYNC);
+        munmap(session->mapping, session->filesize);
+    }
     close(session->fd);
     free(session);
 }
