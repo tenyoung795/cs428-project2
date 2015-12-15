@@ -11,4 +11,4 @@ server.o: server.c common.h
 .PHONY: all clean
 
 clean:
-	rm -f server server.o
+	rm -f client server *.o
