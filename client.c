@@ -22,7 +22,7 @@ char start_packet[CS428_START_PACKET_SIZE];
 char content_packet[CS428_MAX_PACKET_SIZE];
 int last_ack;
 fd_set set;
-struct timeval timev={2,0};
+struct timeval timev;
 char *create_packet(FILE *fp,uint64_t seq_no){
     if(seq_no==0)
     { 
@@ -65,8 +65,6 @@ int cs428_connect(char* ip, FILE *fp)
            perror("fail to create socket");
            return 0;
        }
-        FD_ZERO(&set);
-        FD_SET(cs428_socket,&set);
        printf("entering\n");
         struct addrinfo hints;
         struct addrinfo *servaddr;
@@ -131,7 +129,10 @@ printf("timelist:%ld\n",timeout_list[0]);
 
         time_t current_time = time(NULL);
         if (earliest_deadline > current_time) {
+            FD_ZERO(&set);
+            FD_SET(cs428_socket,&set);
             timev.tv_sec = earliest_deadline - current_time;
+            timev.tv_usec = 0;
             if(select(cs428_socket+1,&set,NULL,NULL,&timev)>0)
             {
              char msg_recv[8];
