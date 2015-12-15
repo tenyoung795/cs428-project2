@@ -27,8 +27,6 @@ enum {
         + CS428_FILENAME_MAX // filename
         + 8, // filesize
     CS428_WINDOW_SIZE = 16,
-    CS428_SERVER_PORT = 9999,
-    CS428_CLIENT_PORT = 9998,
 };
 
 static uint64_t cs428_ntoh64(const void *x) {
