@@ -218,15 +218,7 @@ static int cs428_server_init(cs428_server_t *server, in_port_t port,
     return 0;
 }
 
-static void cs428_server_ack(cs428_server_t *server, const cs428_session_t *session) {
-    {
-        int32_t random_result;
-        random_r(&server->random, &random_result);
-        if (random_result < server->fraction_send_dropped * RAND_MAX) {
-            return;
-        }
-    }
-
+static void cs428_server_ack(const cs428_server_t *server, const cs428_session_t *session) {
     uint64_t ack_no = session->first_seq_no + session->last_frame_received
         - (session->last_frame_received == cs428_last_content_frame(session->filesize)
            && !session->renamed);
@@ -263,12 +255,10 @@ static void cs428_server_run(cs428_server_t *server) {
             continue;
         }
 
-        {
-            int32_t random_result;
-            random_r(&server->random, &random_result);
-            if (random_result < server->fraction_recv_dropped * RAND_MAX) {
-                continue;
-            }
+        int32_t random_result;
+        random_r(&server->random, &random_result);
+        if (random_result < server->fraction_recv_dropped * (RAND_MAX + (uint64_t)1)) {
+            continue;
         }
 
         if (result < CS428_MIN_PACKET_SIZE) {
@@ -296,7 +286,9 @@ static void cs428_server_run(cs428_server_t *server) {
                 break;
             }
 
-            cs428_server_ack(server, server->sessions);
+            if (random_result >= server->fraction_send_dropped * (RAND_MAX + (uint64_t)1)) {
+                cs428_server_ack(server, server->sessions);
+            }
             break;
         }
         case CS428_CONTENT: {
@@ -324,7 +316,11 @@ static void cs428_server_run(cs428_server_t *server) {
             if (frame <= previous_last_frame_received
                 || session->last_frame_received > previous_last_frame_received
                 || session->renamed) {
-                cs428_server_ack(server, session);
+                int32_t random_result;
+                random_r(&server->random, &random_result);
+                if (random_result >= server->fraction_send_dropped * (RAND_MAX + (uint64_t)1)) {
+                    cs428_server_ack(server, session);
+                }
             }
 
             uint64_t last_content_frame = cs428_last_content_frame(session->filesize);
