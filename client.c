@@ -14,13 +14,14 @@
 #include <sys/time.h>
 #include <time.h>
 #include <limits.h>
+#include <inttypes.h>
 int chunk_no;
 int is_last_frame;
 uint64_t filesize;
 char * filename;
 char start_packet[CS428_START_PACKET_SIZE];
 char content_packet[CS428_MAX_PACKET_SIZE];
-int last_ack;
+int64_t last_ack;
 fd_set set;
 struct timeval timev;
 char *create_packet(FILE *fp,uint64_t seq_no){
@@ -82,7 +83,6 @@ int cs428_connect(const char* ip, const char *port, FILE *fp)
             perror("connect failed");
             return 0;
         }
-        int packet_amount=filesize/CS428_MAX_CONTENT_SIZE + 1;
         time_t timeout_list[CS428_WINDOW_SIZE];
         memset(timeout_list,0,sizeof(timeout_list));
 printf("timelist:%ld\n",timeout_list[0]);
@@ -95,13 +95,13 @@ printf("timelist:%ld\n",timeout_list[0]);
         {
             
             uint64_t frame = last_ack + 1 + i;
-            printf("frame:%d\n",frame);
+            printf("frame:%"PRIu64"\n",frame);
             size_t j = frame % CS428_WINDOW_SIZE;
             if(timeout_list[j]<=time(NULL))
             {
                             int packet_size;
              packet=create_packet(fp,frame);
-         printf("frame:%d\n",frame);
+         printf("frame:%"PRIu64"\n",frame);
          if(frame==0)
             packet_size=CS428_START_PACKET_SIZE;
          else if(frame==1+filesize/CS428_MAX_CONTENT_SIZE)
@@ -139,11 +139,11 @@ printf("timelist:%ld\n",timeout_list[0]);
                return 0;
            }
             
-           int ack_seq=cs428_ntoh64(msg_recv);
-           printf("ack_seq:%d\n",ack_seq);
+           uint64_t ack_seq=cs428_ntoh64(msg_recv);
+           printf("ack_seq:%"PRIu64"\n",ack_seq);
 
 
-           if(ack_seq > last_ack){
+           if((int64_t)ack_seq > last_ack){
             for (uint64_t frame = last_ack + 1; frame <= ack_seq; ++frame) {
                 timeout_list[frame % CS428_WINDOW_SIZE]=0;
             }
@@ -183,7 +183,7 @@ int main(int argc, char* argv[])
         filename=argv[4];
         if((fp=fopen(argv[3],"rb"))!=0)
         {  
-            printf("reading%s  filename:%s filesize:%d\n",argv[3],filename,filesize);
+            printf("reading%s  filename:%s filesize:%"PRIu64"\n",argv[3],filename,filesize);
             }
     
        cs428_connect(ipaddr,port,fp);
