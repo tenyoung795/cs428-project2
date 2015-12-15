@@ -10,14 +10,20 @@
 #include "common.h"
 #include <sys/stat.h>
 #include <stdbool.h>
-uint64_t seq_no;
+#include <sys/select.h>
+#include <sys/time.h>
+#include <time.h>
+#include <limits.h>
 int chunk_no;
 int is_last_frame;
 uint64_t filesize;
 char * filename;
 char start_packet[CS428_START_PACKET_SIZE];
 char content_packet[CS428_MAX_PACKET_SIZE];
-char *create_packet(FILE *fp){
+int last_ack;
+fd_set set;
+struct timeval timev={2,0};
+char *create_packet(FILE *fp,uint64_t seq_no){
     if(seq_no==0)
     { 
         uint64_t onseq=cs428_hton64(seq_no);
@@ -27,23 +33,20 @@ char *create_packet(FILE *fp){
       strcpy(&start_packet[8+1], filename);
       uint64_t fs=cs428_hton64(filesize);
       memcpy((void*)&start_packet[8+1+CS428_FILENAME_MAX],(void *)&fs,sizeof(fs));
-      seq_no++;
       return start_packet;
     }
     else{
         uint64_t onseq=cs428_hton64(seq_no);
         memcpy(content_packet,&onseq,sizeof(onseq));
         content_packet[8]=CS428_CONTENT;
-        if(fseek(fp, 512*chunk_no,SEEK_SET)!=0){
+        if(fseek(fp, CS428_MAX_CONTENT_SIZE*(seq_no - 1),SEEK_SET)!=0){
             perror("fseek failed");
             return 0;
         }
-        seq_no++;
 
         int chunk_read=fread(&content_packet[8+1],1, CS428_MAX_CONTENT_SIZE,fp);
         if (chunk_read==CS428_MAX_CONTENT_SIZE)
         {   
-            chunk_no++;
             return content_packet;
         }
         else if(chunk_read<CS428_MAX_CONTENT_SIZE)
@@ -62,6 +65,8 @@ int cs428_connect(char* ip, FILE *fp)
            perror("fail to create socket");
            return 0;
        }
+        FD_ZERO(&set);
+        FD_SET(cs428_socket,&set);
        printf("entering\n");
         struct addrinfo hints;
         struct addrinfo *servaddr;
@@ -76,59 +81,107 @@ int cs428_connect(char* ip, FILE *fp)
             fprintf(stderr, "getaddrinfo error:%s\n", gai_strerror(status));
                     exit(1);
             }
-        char *test="testing";
         if(connect(cs428_socket,servaddr->ai_addr,servaddr->ai_addrlen)<0)
         { 
             perror("connect failed");
             return 0;
         }
-        
+        int packet_amount=filesize/CS428_MAX_CONTENT_SIZE + 1;
+        time_t timeout_list[CS428_WINDOW_SIZE];
+        memset(timeout_list,0,sizeof(timeout_list));
+printf("timelist:%ld\n",timeout_list[0]);
+
         while(!is_last_frame)
         {
-       char *packet;
-        int packet_size;
-               packet=create_packet(fp);
-        printf("seq_no:%d\n",seq_no);
-         if(seq_no==1)
+        char *packet;
+        time_t earliest_deadline = LONG_MAX;
+        for(int i = 0;i<CS428_WINDOW_SIZE;i++)
+        {
+            
+            uint64_t frame = last_ack + 1 + i;
+            printf("frame:%d\n",frame);
+            size_t j = frame % CS428_WINDOW_SIZE;
+            if(timeout_list[j]<=time(NULL))
+            {
+                            int packet_size;
+             packet=create_packet(fp,frame);
+         printf("frame:%d\n",frame);
+         if(frame==0)
             packet_size=CS428_START_PACKET_SIZE;
-        else if(seq_no==1+filesize/CS428_MAX_CONTENT_SIZE+1)
+         else if(frame==1+filesize/CS428_MAX_CONTENT_SIZE)
             packet_size=8+1+filesize%CS428_MAX_CONTENT_SIZE;
         else
             packet_size=CS428_MAX_PACKET_SIZE;
-       
+
         if(sendto(cs428_socket,packet,packet_size,0,servaddr->ai_addr,servaddr->ai_addrlen)<0)
-        {
+             {
             perror("sendto faild");
-            return 0;
+                       return 0;
+            
             }
-         char msg_recv[8];
-       if(recv(cs428_socket,msg_recv,8,0)<0){
-           perror("receive error");
-           return 0;
-       }
-       int ack_seq=cs428_ntoh64(msg_recv);
-       printf("ack_seq%d",ack_seq);
+            timeout_list[j]= time(NULL) + 2;
+
+            }
+            if (timeout_list[j] < earliest_deadline) {
+                earliest_deadline = timeout_list[j];
+            }
+            if(frame==1+filesize/CS428_MAX_CONTENT_SIZE)
+                break;
+            }
+
+        time_t current_time = time(NULL);
+        if (earliest_deadline > current_time) {
+            timev.tv_sec = earliest_deadline - current_time;
+            if(select(cs428_socket+1,&set,NULL,NULL,&timev)>0)
+            {
+             char msg_recv[8];
+           if(recv(cs428_socket,msg_recv,8,0)<0){
+               perror("receive error");
+               return 0;
+           }
+            
+           int ack_seq=cs428_ntoh64(msg_recv);
+           printf("ack_seq:%d\n",ack_seq);
 
 
+           if(ack_seq > last_ack){
+            for (uint64_t frame = last_ack + 1; frame <= ack_seq; ++frame) {
+                timeout_list[frame % CS428_WINDOW_SIZE]=0;
+            }
+            last_ack=ack_seq;
+                                        }
+                }
         }
+        }
+        char packet[9];
+        uint64_t final_seq_no = cs428_hton64(last_ack + 1);
+        memcpy(packet, &final_seq_no, 8);
+        packet[8] = CS428_CONTENT;
+        if(sendto(cs428_socket,packet,sizeof(packet),0,servaddr->ai_addr,servaddr->ai_addrlen)<0)
+             {
+            perror("sendto faild");
+                       return 0;
+            
+            }
              return 0;
     }
  
         
 int main(int argc, char* argv[])
     {
+        last_ack=-1;
         if(argc<3){
             fprintf(stderr, "Usage:%s IP_Adress Filename\n", argv[0]);
             return EXIT_FAILURE;
             }
         FILE *fp;
-        seq_no=0;
+        chunk_no=0;
         char *ipaddr=argv[2];
         struct stat st;
         stat(argv[1],&st);
         filesize=st.st_size;
         filename=strdup(argv[1]);
-        if((fp=fopen(argv[1],"rb"))>0)
+        if((fp=fopen(argv[1],"rb"))!=0)
         {  
             basename(filename);
             printf("reading%s  filename:%s filesize:%d\n",argv[1],filename,filesize);
